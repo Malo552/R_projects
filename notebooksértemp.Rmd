@@ -1,0 +1,151 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+Imports:
+```{r}
+library(plotly)
+library(zoo)
+library(timeSeries)
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(fUnitRoots)
+```
+
+### On importe ensuite les données utilisées, et on rend les données utilisables
+
+```{r}
+path="/Users/IcloudElliott/Desktop/ENSAE/2A/R"
+setwd(path)
+getwd()
+
+data=read.csv("pates.csv",sep = ';',stringsAsFactors=FALSE)
+
+data = data[c(0,1,2)] #on enleve la colonne des indicateurs
+data = data[-c(1,2,3),] #on enleve les premières lignes inutiles
+
+colnames(data)[1] <- "date"
+colnames(data)[2] <- "production" #on renomme les colonnes
+rownames(data) <- NULL #on reset l'index pour partir de 0
+
+data$date <- as.Date(as.yearmon(data$date)) #on met les dates dans un format lisible par R
+
+data$production <- as.numeric(as.character(data$production)) #de même pour les indices
+
+ggplot(data = data, mapping = aes(x = date, y = production))+geom_line()
+
+```
+On voit que la série semble déjà à peu près stationnaire.
+```{r}
+T = length(data$date)
+deriv = data[c(0:(T-1)),] 
+deriv$production = diff(data$production) #on définit la série
+
+acf(deriv$production) # on affiche les fonctions d'autocorrélation
+pacf(deriv$production)
+ggplot(data = deriv, mapping = aes(x = date, y = production)) + geom_line()
+
+```
+On voit sur les graphiques d'autocorrélation que subsistent uniquement des ordres faibles d'autocorrélation, on a à priori bien enlevé la tendance globale : on le vérifie par deux tests de stationarité.
+
+```{r}
+adf.test(data$production) #on vérifie qu'on a bien rendu la série stationnaire
+
+adf.test(deriv$production) #on vérifie qu'on a bien rendu la série stationnaire
+```
+On voit que dans les deux cas, on aurait affaire à des séries stationnaires. Cependant, la valeur du test est considérablement plus faible avec la série dérivé, c'est elle qu'on retient.
+
+
+On choisit les paramètres ARMA en regardant les fonctions d'autocorrélation : on a un seul ordre clairement positif sur l'ACF, donc on prend un MA = 1, et on en a 3 de plus en plus importants sur la PACF, on essaye donc AR = 3. On peut tester les AIC des modèles obtenus en faisant varier ces coefficients de plus ou moins 1 : il sont toujours plus importants.
+```{r}
+x = deriv$production
+min =5000
+minord = c(0,0,0)
+
+for (p in c(0:6)){
+  for (q in c(0:2)){
+    mod = arima(x, order = c(p,0,q))
+    if (AIC(mod)<=min){
+      min = AIC(mod)
+      minord = c(p,0,q)
+    }
+  }
+}
+print(minord)
+
+```
+Un recherche à la main nous indique que le modèle au BIC le plus bas est un ARIMA(1,0,1). On vérifie cela ci dessous.
+```{r}
+model11 = arima(x,order=c(1,0,1), include.mean = F)
+summary(model11)
+t=model11$coef/sqrt(diag(model11$var.coef))
+pval = (1-pnorm(abs(t)))*2
+print(c("pvalues : ",pval))
+```
+On voit que tous les coefficients sont bien significatifs, avec des pvaleurs très faibles.
+```{r}
+automod = auto.arima(x)
+
+summary(automod)
+
+t=automod$coef/sqrt(diag(automod$var.coef))
+pval = (1-pnorm(abs(t)))*2
+print(c("pvalues : ",round(pval,5)))
+```
+La fonction auto.arima nous indique ici un modèle arima (2,1,2). C'est aussi cohérent avec les graphes d'autocorrélation : on observait un faible nombre d'ordres significatifs sur la pacf et sur l'acf.
+
+On calcule le R2 des deux modèles pour voir lequel conserver.
+```{r}
+adj_r2 = function(model,sample=x){
+  ss_res = sum(model$residuals^2) #somme des residus au carre
+  p = length(model$model$phi) #recupere l'ordre AR
+  q = length(model$model$theta[model$model$theta!=0]) #recupere l'ordre MA
+  ss_tot <- sum(sample[-max(p,q)]^2) #somme des observations de l'echantillon au carre
+  n <- length(sample[-max(p,q)]) #taille de l'echantillon
+  adj_r2 <- 1-(ss_res/(n-p-q-1))/(ss_tot/(n-1)) #r2 ajuste
+  return(adj_r2)
+}
+print(c(adj_r2(automod),adj_r2(model11)))
+
+```
+On voit que les R2 sont très proches, on a deux modèles à peu près aussi explicatifs. On choisit donc le plus simple, et celui dont le R2 est légèrement plus faible.
+Le modèle total correspond donc à un arima (1,1,1), on effectue ici les prédictions à t+2.
+
+```{r}
+modfinal = arima(data$production, order = c(1,1,1)) #on reprend ici la série non dérivée initiale
+summary(modfinal)
+t=modfinal$coef/sqrt(diag(modfinal$var.coef))
+pval = (1-pnorm(abs(t)))*2
+print(c("pvalues : ",round(pval,5)))
+
+
+pred = predict(modfinal, 2,level = .95) #on effectue les prédictions
+pred
+```
+
+Une fois les prédictions effectuées, il ne reste plus qu'à les afficher, ainsi que leurs intervalles de confiance.
+
+```{r}
+queue = tail(data,n=20)
+queue$indices <- 1:20
+y <- c(queue$production, pred$pred)
+x <- 1:22
+se = c(rep(0, 20),pred$se)
+
+plotdata <- data.frame(x=x, y=y, lower = (y-se), upper = (y+se))
+
+p <-ggplot(plotdata) + geom_line(aes(y=y, x=x, colour = "production"))+
+    geom_ribbon(aes(ymin=lower, ymax=upper, x=x, fill = "région de confiance"), alpha = 0.2)+
+    scale_colour_manual("",values="blue")+
+    scale_fill_manual("",values="grey12") 
+
+
+fig <- ggplotly(width = 800)
+
+fig
+```
+
+
